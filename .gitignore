@@ -1,0 +1,6 @@
+*.csv
+*.xlsx
+__pychae__/
+.env
+.venv/
+.ipynb_checkpoints/
