@@ -8,7 +8,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split, cross_val_score, cross_val_predict
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 
 import nltk
 from nltk.corpus import stopwords
@@ -146,7 +146,7 @@ def initial_ml_clustering(df_ml, tfidf_features, phrase_features, target_col='Pa
 	meta_model = train_meta_learner(model_tfidf, model_phrases, model_combined,
 									X_tfidf, X_phrases, X_combined, y)
 
-	return model_tfidf, model_phrases, model_combined, meta_model, df_filtered, X_tfidf, X_phrases
+	return model_tfidf, model_phrases, model_combined, meta_model, df_filtered, X_tfidf, X_phrases, y
 
 def train_tfidf_model(X_tfidf, y):
 	"""Train model using TF-IDF features"""
@@ -235,18 +235,178 @@ def train_meta_learner(model_tfidf, model_phrases, model_combined, X_tfidf, X_ph
 
 	return meta_model
 
+def analyze_vocabulary_consistency(df_filtered, y, feature_names, X_tfidf):
+	"""Analyse vocabulary consistency within each fialure category"""
+	from collections import defaultdict
+
+	print(f"\nVOCABULARY CONSISTENCY ANALYSIS:")
+	print("Category | Unique Tokens | Avg Tokens/Report | Consistency Score")
+	print("-"*50)
+
+	consistency_scores = []
+
+	# For each failure category
+	for category in sorted(y.unique()):
+		category_mask = (y == category)
+		category_reports = df_filtered[category_mask]['report_clean']
+		category_tfidf = X_tfidf[category_mask]
+
+		# Calculate vocabulary diversity metrics
+		total_reports = len(category_reports)
+
+		# Get non-zero features for this category
+		category_features = category_tfidf.sum(axis=0).A1	# Convert to 1D array
+		active_features = np.where(category_features > 0)[0]
+		unique_tokens = len(active_features)
+
+		# average tokens per report
+		avg_tokens_per_report = category_tfidf.nnz / total_reports if total_reports > 0 else 0
+
+		# Consistency score: higher when fewer unique tokens relative to reports
+		# This indicates more consistent vocabulary usage
+		if total_reports > 1 and unique_tokens > 0:
+			consistency_score = 1 - (unique_tokens / (total_reports * avg_tokens_per_report))
+			consistency_score = max(0, consistency_score)	# Normalise to 0-1
+		else:
+			consistency_score = 0
+
+		consistency_scores.append((category, unique_tokens, avg_tokens_per_report, consistency_score, total_reports))
+
+		if total_reports >= 10:	# Only show categories with sufficient data
+			print(f"{category[:25]:<25} | {unique_tokens:>8} | {avg_tokens_per_report:>12.1f} | {consistency_score:>12.3f}")
+
+	# Sort by consistency score (lowest first = most inconsistent)
+	consistency_scores.sort(key=lambda x: x[3])
+
+	print(f"\nMOST INCONSISTENT VOCABULARIES (needs standardisation):")
+	print("Category | Consistency Score | Sample Size")
+	print("-"*50)
+	for category, _, _, consistency, sample_size in consistency_scores[:10]:
+		if sample_size >= 10:	# Only show meaningful sample sizes
+			print(f"{category[:30]:<30} | {consistency:>13.3f} | {sample_size:>6}")
+
+	return consistency_scores
+
+def analyze_classification_quality(model_tfidf, df_filtered, X_tfidf, y, tfidf_vectorizer):
+	"""Analyse quality and consistency of failure classifications"""
+	print("="*50)
+	print("CLASSIFICATION QUALITY AUDIT")
+	print("="*50)
+
+	# Get predictions for confusion matrix
+	y_pred = cross_val_predict(model_tfidf, X_tfidf, y, cv=5)
+
+	# 1. LOW CONFIDENCE CATEGORIES (poor performance)
+	report = classification_report(y, y_pred, output_dict=True)
+
+	low_confidence = []
+	for category, metrics in report.items():
+		if category not in ['accuracy', 'macro avg', 'weighted avg']:
+			if metrics['f1-score'] < 0.7:	# Threshold for "problematic"
+				low_confidence.append((category, metrics['f1-score'], metrics['support']))
+
+	low_confidence.sort(key=lambda x: x[1])		# Sort by F1 score (worst first)
+
+	print("\nLOW CONFIDENCE CATEGORIES (F1 < 0.7):")
+	print("Category | F1 Score | Sample Size")
+	print("-"*50)
+	for category, f1, support in low_confidence:
+		print(f"{category[:30]:<30} | {f1:.3f} | {support}")
+
+	# 2. CONFUSED PAIRS (categories frequently misclassified as each other)
+	labels = sorted(y.unique())
+	conf_matrix = confusion_matrix(y, y_pred, labels=labels)
+
+	confused_pairs = []
+	for i in range(len(labels)):
+		for j in range(len(labels)):
+			if i != j and conf_matrix[i, j] > 5:	# At least 5 misclassifications
+				confusion_rate = conf_matrix[i, j] / conf_matrix[i].sum()
+				if confusion_rate > 0.1:	# More than 10% confusion rate
+					confused_pairs.append((labels[i], labels[j], conf_matrix[i, j], confusion_rate))
+
+	confused_pairs.sort(key=lambda x: x[3], reverse=True)	# Sort by confusion rate
+
+	print(f"\nCONFUSED PAIRS (>10% misclassification rate):")
+	print("True Category -> Predicted As | Count | Rate")
+	print("-"*50)
+	for true_cat, pred_cat, count, rate in confused_pairs[:10]:	# Top 10
+		print(f"{true_cat[:20]:<20} -> {pred_cat[:20]:<20} | {count:>3} | {rate:.1%}")
+
+	# 3. INCONSISTENT VOCABULARIES (same failure type, different token)
+	feature_names = tfidf_vectorizer.get_feature_names_out()
+	vocabulary_consistency = analyze_vocabulary_consistency(df_filtered, y, feature_names, X_tfidf)
+
+	return low_confidence, confused_pairs, vocabulary_consistency, y_pred
+
+def generate_business_recommendations(low_confidence, confused_pairs, vocabulary_consistency):
+	"""Generate 80/20 recommendations for M&S teams"""
+
+	print("\n" + "="*50)
+	print("BUSINESS RECOMMENDATIONS (80/20 ANALYSIS)")
+	print("="*50)
+
+	print("\n🔴 HIGH PRIORITY (Immediate Action Required):")
+
+	# Worst performing categories with sufficient sample size
+	high_priority = [item for item in low_confidence if item[2] >= 20]	# At least 20 samples
+	for category, f1, support in high_priority[:5]:
+		print(f"  • {category}")
+		print(f"	Issue: Poor classification accuracy ({f1:.1%})")
+		print(f"	Impact: {support} incidents affected")
+		print(f"	Action: Review documentation standards and provide targeted training")
+		print()
+
+	print("🟡 MEDIUM PRIORITY (Standardisation Needed):")
+
+	# Most confused pairs
+	for true_cat, pred_cat, count, rate in confused_pairs[:3]:
+		print(f"  • '{true_cat}' often misclassified as '{pred_cat}' ({rate:.1%} of time")
+		print(f"	Action: Clarify distinction between these categories in training materials")
+		print()
+
+	# Most inconsistent vocabularies
+	inconsistent = [item for item in vocabulary_consistency if item[4] >= 20]	# Sufficient sample
+	for category, _, _, consistency, sample_size in inconsistent[:3]:
+		print(f"  • {category}")
+		print(f"	Issue: Highly inconsistent terminology (score: {consistency:.3f})")
+		print(f"	Action: Develop standardised vocabulary guide")
+		print()
+
+	print("🟢 LOW PRIORITY (Monitor):")
+	print("  • Categories with >80% accuracy and consistent vocabulary")
+	print("  • Continue current documentation practices")
+
+	return {
+		'high_priority': high_priority,
+		'confused_pairs': confused_pairs,
+		'inconsistent_vocab': inconsistent
+	}
+
+def run_business_analysis(model_tfidf, df_filtered, X_tfidf, y, tfidf_vectorizer):
+	"""Run complete business analysis"""
+	low_confidence, confused_pairs, vocabulary_consistency, y_pred = analyze_classification_quality(
+		model_tfidf, df_filtered, X_tfidf, y, tfidf_vectorizer
+	)
+
+	recommendations = generate_business_recommendations(low_confidence, confused_pairs, vocabulary_consistency)
+
+	return low_confidence, confused_pairs, vocabulary_consistency, recommendations
+
 if __name__ == "__main__":
 	# Load and process
 	df = load_raw_data()
 	df_ml, tfidf_features, phrase_features, tfidf_vec, phrase_vec = feature_engineering(df)
 
 	# Run initial clustering/classification
-	model_tfidf, model_phrases, model_combined, meta_model, df_filtered, X_tfidf, X_phrases = initial_ml_clustering(
+	model_tfidf, model_phrases, model_combined, meta_model, df_filtered, X_tfidf, X_phrases, y = initial_ml_clustering(
 		df_ml, tfidf_features, phrase_features
 	)
 
 	print("Initial processing complete!")
 	print("All models trained including meta-learner!")
+	print("Starting Business Analysis!")
+	run_business_analysis(model_tfidf, df_filtered, X_tfidf, y, tfidf_vec)
 
 	# feature_names = tfidf_vec.get_feature_names_out()
 	# importances = model_tfidf.feature_importances_
