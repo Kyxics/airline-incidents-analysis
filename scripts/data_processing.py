@@ -249,7 +249,7 @@ def analyze_vocabulary_consistency(df_filtered, y, feature_names, X_tfidf):
 	for category in sorted(y.unique()):
 		category_mask = (y == category)
 		category_reports = df_filtered[category_mask]['report_clean']
-		category_tfidf = X_tfidf[category_mask]
+		category_tfidf = X_tfidf[category_mask.values]
 
 		# Calculate vocabulary diversity metrics
 		total_reports = len(category_reports)
