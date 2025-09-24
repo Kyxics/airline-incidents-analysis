@@ -3,6 +3,9 @@
 ## Project Overview
 Analysis of airline incident reports to evaluate the effectiveness of current Part Failure classification systems and identify areas for improvement in maintenance documentation practices.
 
+Kaggle dataset page:
+https://www.kaggle.com/datasets/tarique7/airline-incidents-safety-data?select=Airline+Occurences.csv
+
 ## Business Objective
 Rather than creating a new Classification System, this analysis audits existing "Part Failure" classifications to identify:
 - Which failure categories are well-documented vs poorly documented
