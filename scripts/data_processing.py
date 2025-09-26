@@ -296,6 +296,18 @@ def analyze_classification_quality(model_tfidf, df_filtered, X_tfidf, y, tfidf_v
 	# Get predictions for confusion matrix
 	y_pred = cross_val_predict(model_tfidf, X_tfidf, y, cv=5)
 
+	# Create a mapping of predictions to original indices
+	prediction_indices = {}
+	for idx, (true_label, pred_label) in enumerate(zip(y, y_pred)):
+		original_idx = df_filtered.index[idx]
+		if true_label not in prediction_indices:
+			prediction_indices[true_label] = {'correct': [], 'incorrect': []}
+
+		if true_label == pred_label:
+			prediction_indices[true_label]['correct'].append(original_idx)
+		else:
+			prediction_indices[true_label]['incorrect'].append(original_idx)
+
 	# 1. LOW CONFIDENCE CATEGORIES (poor performance)
 	report = classification_report(y, y_pred, output_dict=True)
 
@@ -311,7 +323,8 @@ def analyze_classification_quality(model_tfidf, df_filtered, X_tfidf, y, tfidf_v
 	print("Category | F1 Score | Sample Size")
 	print("-"*50)
 	for category, f1, support in low_confidence:
-		print(f"{category[:30]:<30} | {f1:.3f} | {support}")
+		incorrect_samples = prediction_indices.get(category, {}).get('incorrect', [])
+		print(f"{category[:30]:<30} | {f1:.3f} | {support} | Sample indices: {incorrect_samples[:5]}...")
 
 	# 2. CONFUSED PAIRS (categories frequently misclassified as each other)
 	labels = sorted(y.unique())
@@ -327,11 +340,21 @@ def analyze_classification_quality(model_tfidf, df_filtered, X_tfidf, y, tfidf_v
 
 	confused_pairs.sort(key=lambda x: x[3], reverse=True)	# Sort by confusion rate
 
+	# Store examples of each confusion pair
+	confusion_examples = {}
+	for i, (true_cat, pred_cat) in enumerate(zip(y, y_pred)):
+		if true_cat != pred_cat:
+			pair = (true_cat, pred_cat)
+			if pair not in confusion_examples:
+				confusion_examples[pair] = []
+			confusion_examples[pair].append(df_filtered.index[i])
+
 	print(f"\nCONFUSED PAIRS (>10% misclassification rate):")
 	print("True Category -> Predicted As | Count | Rate")
 	print("-"*50)
 	for true_cat, pred_cat, count, rate in confused_pairs[:10]:	# Top 10
-		print(f"{true_cat[:20]:<20} -> {pred_cat[:20]:<20} | {count:>3} | {rate:.1%}")
+		examples = confusion_examples.get((true_cat, pred_cat), [])[:3]
+		print(f"{true_cat[:20]:<20} -> {pred_cat[:20]:<20} | {count:>3} | {rate:.1%} | Examples: {examples}")
 
 	# 3. INCONSISTENT VOCABULARIES (same failure type, different token)
 	feature_names = tfidf_vectorizer.get_feature_names_out()
@@ -361,7 +384,7 @@ def generate_business_recommendations(low_confidence, confused_pairs, vocabulary
 
 	# Most confused pairs
 	for true_cat, pred_cat, count, rate in confused_pairs[:3]:
-		print(f"  • '{true_cat}' often misclassified as '{pred_cat}' ({rate:.1%} of time")
+		print(f"  • '{true_cat}' often misclassified as '{pred_cat}' ({rate:.1%} of time)")
 		print(f"	Action: Clarify distinction between these categories in training materials")
 		print()
 
